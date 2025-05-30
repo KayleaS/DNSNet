@@ -72,7 +72,7 @@ impl<'a> DnsPacketProxy<'a> {
         backend: &mut Box<dyn DnsBackend>,
         packet_data: &[u8],
     ) -> Result<(), VpnError> {
-        let packet = match GenericIpPacket::from_ip_packet(packet_data) {
+        let packet = match GenericIpPacket::new(packet_data) {
             Some(value) => value,
             None => {
                 warn!(
@@ -113,7 +113,6 @@ impl<'a> DnsPacketProxy<'a> {
                 }
             };
 
-        let destination_port = udp_packet.destination_port();
         let mut dns_packet = match simple_dns::Packet::parse(udp_packet.payload()) {
             Ok(value) => value,
             Err(error) => {
@@ -155,7 +154,6 @@ impl<'a> DnsPacketProxy<'a> {
                 udp_packet.payload(),
                 packet_data,
                 translated_destination_address,
-                destination_port,
             ) {
                 error!("handle_dns_request: Failed to forward packet - {:?}", error);
                 match error {
@@ -182,7 +180,7 @@ impl<'a> DnsPacketProxy<'a> {
                 return Ok(());
             }
 
-            ad_vpn.handle_dns_response(packet_data, &wire);
+            ad_vpn.handle_dns_response(packet_data, &wire, 0);
         }
         return Ok(());
     }

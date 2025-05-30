@@ -7,71 +7,49 @@
  */
 
 use etherparse::{
-    IpHeaders, IpNumber, Ipv4Header, Ipv6FlowLabel, Ipv6Header, NetSlice, PacketBuilder,
-    PacketBuilderStep, SlicedPacket, TransportSlice, UdpSlice, ip_number,
+    IpHeaders, IpNumber, IpPayloadSlice, Ipv4Header, Ipv6FlowLabel, Ipv6Header, PacketBuilder,
+    PacketBuilderStep, UdpSlice, ip_number,
 };
 
 /// Basic abstraction over a packet that lets us get a slice of a IPv4 or IPv6 header or payload
 /// without doing extra allocations
 #[derive(Debug)]
 pub struct GenericIpPacket<'a> {
-    packet: SlicedPacket<'a>,
+    header: IpHeaders,
+    payload: IpPayloadSlice<'a>,
 }
 
 impl<'a> GenericIpPacket<'a> {
     /// Creates a new GenericIpPacket from a raw IP packet byte array
-    pub fn from_ip_packet(data: &'a [u8]) -> Option<Self> {
-        match SlicedPacket::from_ip(data) {
-            Ok(value) => Some(GenericIpPacket::new(value)),
-            Err(_) => None,
-        }
-    }
-
-    pub fn new(packet: SlicedPacket<'a>) -> Self {
-        Self { packet }
-    }
-
-    /// Gets a slice of the IPv4 header from the packet and returns None if the packet is not IPv4
-    pub fn get_ipv4_header(&self) -> Option<Ipv4Header> {
-        match &self.packet.net {
-            Some(net) => match net {
-                NetSlice::Ipv4(value) => Some(value.header().to_header()),
-                _ => None,
-            },
-            None => None,
-        }
-    }
-
-    /// Gets a slice of the IPv6 header from the packet and returns None if the packet is not IPv6
-    pub fn get_ipv6_header(&self) -> Option<Ipv6Header> {
-        match &self.packet.net {
-            Some(net) => match net {
-                NetSlice::Ipv6(value) => Some(value.header().to_header()),
-                _ => None,
-            },
-            None => None,
+    pub fn new(ip_packet_slice: &'a [u8]) -> Option<Self> {
+        match IpHeaders::from_slice(ip_packet_slice) {
+            Ok((header, payload)) => Some(Self { header, payload }),
+            Err(error) => {
+                error!("new: Failed to parse IP packet slice! - {:?}", error);
+                None
+            }
         }
     }
 
     /// Gets a slice of the destination address from the packet header
     pub fn get_destination_address(&self) -> Option<Vec<u8>> {
-        if let Some(header) = self.get_ipv4_header() {
-            return Some(header.destination.to_vec());
+        match &self.header {
+            IpHeaders::Ipv4(ipv4_header, _) => Some(ipv4_header.destination.to_vec()),
+            IpHeaders::Ipv6(ipv6_header, _) => Some(ipv6_header.destination.to_vec()),
         }
-        if let Some(header) = self.get_ipv6_header() {
-            return Some(header.destination.to_vec());
-        }
-        return None;
     }
 
     /// Gets a slice of the UDP payload from the packet
-    pub fn get_udp_packet(&self) -> Option<&UdpSlice> {
-        match &self.packet.transport {
-            Some(transport) => match transport {
-                TransportSlice::Udp(udp) => Some(udp),
-                _ => None,
-            },
-            None => None,
+    pub fn get_udp_packet(&self) -> Option<UdpSlice> {
+        match UdpSlice::from_slice(&self.payload.payload) {
+            Ok(slice) => Some(slice),
+            Err(error) => {
+                error!(
+                    "get_udp_packet: Failed to create UdpSlice from IP payload! - {:?}",
+                    error
+                );
+                None
+            }
         }
     }
 }
@@ -146,8 +124,8 @@ fn build_ip_packet_with_udp_payload(
 }
 
 /// Takes the header information from the request packet and builds a new packet using it and the response payload
-pub fn build_response_packet(request_packet: &[u8], response_payload: &[u8]) -> Option<Vec<u8>> {
-    let generic_request_packet = match GenericIpPacket::from_ip_packet(request_packet) {
+pub fn build_response_ip_packet(request_ip_packet: &[u8], response_udp_payload: &[u8]) -> Option<Vec<u8>> {
+    let generic_request_packet = match GenericIpPacket::new(request_ip_packet) {
         Some(value) => value,
         None => return None,
     };
@@ -157,30 +135,25 @@ pub fn build_response_packet(request_packet: &[u8], response_payload: &[u8]) -> 
         None => return None,
     };
 
-    if let Some(header) = generic_request_packet.get_ipv4_header() {
-        return build_ipv4_packet_with_udp_payload(
-            &header.destination,
+    match &generic_request_packet.header {
+        IpHeaders::Ipv4(ipv4_header, _) => build_ipv4_packet_with_udp_payload(
+            &ipv4_header.destination,
             request_payload.destination_port(),
-            &header.source,
+            &ipv4_header.source,
             request_payload.source_port(),
-            header.time_to_live,
-            header.identification,
-            &response_payload,
-        );
-    }
-
-    if let Some(header) = generic_request_packet.get_ipv6_header() {
-        return build_ipv6_packet_with_udp_payload(
-            &header.destination,
+            ipv4_header.time_to_live,
+            ipv4_header.identification,
+            &response_udp_payload,
+        ),
+        IpHeaders::Ipv6(ipv6_header, _) => build_ipv6_packet_with_udp_payload(
+            &ipv6_header.destination,
             request_payload.destination_port(),
-            &header.source,
+            &ipv6_header.source,
             request_payload.source_port(),
-            header.traffic_class,
-            header.flow_label,
-            header.hop_limit,
-            &response_payload,
-        );
+            ipv6_header.traffic_class,
+            ipv6_header.flow_label,
+            ipv6_header.hop_limit,
+            &response_udp_payload,
+        ),
     }
-
-    return None;
 }

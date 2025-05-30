@@ -39,7 +39,6 @@ pub trait DnsBackend {
         packet: &[u8],
         request_packet: &[u8],
         destination_address: Vec<u8>,
-        destination_port: u16,
     ) -> Result<(), DnsBackendError>;
 
     /// Process all events from the poller and send any processed packets to the [DnsPacketProxy].

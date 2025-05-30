@@ -15,6 +15,7 @@ use std::{
 };
 
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
+use simple_dns::Packet;
 
 use crate::{
     BlockLoggerCallback, VpnCallback,
@@ -24,7 +25,7 @@ use crate::{
         standard::StandardDnsBackend,
     },
     database::RuleDatabase,
-    packet::build_response_packet,
+    packet::build_response_ip_packet,
     proxy::DnsPacketProxy,
     validation::{NativeDnsServer, NativeDnsServerType},
 };
@@ -196,16 +197,20 @@ pub enum VpnConfigurationResult {
 pub struct Vpn {
     vpn_controller: Arc<VpnController>,
     device_writes: VecDeque<Vec<u8>>,
+    response_times: Vec<u128>,
 }
 
 impl Vpn {
     const VPN_TOKEN: Token = Token(usize::MAX);
     const VPN_CONTROLLER_TOKEN: Token = Token(usize::MAX - 1);
 
+    const RESPONSE_TIME_SIZE: usize = 100;
+
     pub fn new(vpn_controller: Arc<VpnController>) -> Self {
         Vpn {
             vpn_controller,
             device_writes: VecDeque::new(),
+            response_times: Vec::new(),
         }
     }
 
@@ -475,10 +480,33 @@ impl Vpn {
     }
 
     /// Handles a DNS response and forwards it to the tunnel with the translated destination
-    pub fn handle_dns_response(&mut self, request_packet: &[u8], response_payload: &[u8]) {
-        match build_response_packet(request_packet, response_payload) {
+    pub fn handle_dns_response(&mut self, request_packet: &[u8], response_payload: &[u8], response_time_millis: u128) {
+        self.report_response_time(response_time_millis);
+        match Packet::parse(response_payload) {
+            Ok(value) => {
+                info!("Packet data - {:?}", value);
+            },
+            Err(_) => {},
+        }
+        match build_response_ip_packet(request_packet, response_payload) {
             Some(packet) => self.device_writes.push_back(packet),
             None => return,
         };
+    }
+
+    fn report_response_time(&mut self, response_time_millis: u128) {
+        if response_time_millis == 0 {
+            return;
+        }
+
+        if self.response_times.len() > Self::RESPONSE_TIME_SIZE {
+            self.response_times.pop();
+        }
+        self.response_times.push(response_time_millis);
+
+        let average = self.response_times.iter().sum::<u128>() / self.response_times.len() as u128;
+        let max = self.response_times.iter().max().unwrap();
+        let min = self.response_times.iter().min().unwrap();
+        info!("report_response_time: Current response time average {}ms, max {}ms, min {}ms", average, max, min);
     }
 }

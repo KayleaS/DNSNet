@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::os::fd::AsRawFd;
+use std::time::Instant;
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     time::Duration,
@@ -15,7 +16,6 @@ use std::{
 
 use mio::{Interest, Poll, Token, event::Source, net::UdpSocket};
 
-use crate::get_epoch;
 use crate::{Vpn, VpnCallback, backend::DnsBackendError};
 
 use super::DnsBackend;
@@ -24,24 +24,23 @@ use super::DnsBackend;
 /// Additionally holds the time that we started waiting on it to see if we need to drop it.
 #[derive(Debug)]
 struct WaitingOnSocketPacket {
+    id: usize,
     socket: UdpSocket,
     socket_registered: bool,
     packet: Vec<u8>,
-    creation_time: u128,
+    creation_time: Instant,
 }
 
 impl WaitingOnSocketPacket {
     fn new(socket: UdpSocket, packet: Vec<u8>) -> Self {
+        let id = getrandom::u64().unwrap() as usize;
         Self {
+            id,
             socket,
             socket_registered: false,
             packet,
-            creation_time: get_epoch().as_millis(),
+            creation_time: Instant::now(),
         }
-    }
-
-    fn age_seconds(&self) -> u128 {
-        (get_epoch().as_millis() - self.creation_time) / 1000
     }
 }
 
@@ -52,7 +51,7 @@ struct WospList {
 
 impl WospList {
     const DNS_MAXIMUM_WAITING: usize = 1024;
-    const DNS_TIMEOUT_SEC: u128 = 10;
+    const DNS_TIMEOUT_MILLIS: u128 = 10_000;
 
     fn new() -> Self {
         Self {
@@ -70,7 +69,7 @@ impl WospList {
         }
 
         while !self.list.is_empty()
-            && self.list.front().unwrap().age_seconds() > Self::DNS_TIMEOUT_SEC
+            && self.list.front().unwrap().creation_time.elapsed().as_millis() > Self::DNS_TIMEOUT_MILLIS
         {
             debug!(
                 "add: Timeout on socket {:?}",
@@ -123,7 +122,7 @@ impl DnsBackend for StandardDnsBackend {
 
             match poll.registry().register(
                 &mut wosp.socket,
-                Token(wosp.creation_time as usize),
+                Token(wosp.id),
                 Interest::READABLE,
             ) {
                 Ok(_) => {
@@ -155,7 +154,6 @@ impl DnsBackend for StandardDnsBackend {
         packet: &[u8],
         request_packet: &[u8],
         destination_address: Vec<u8>,
-        destination_port: u16,
     ) -> Result<(), DnsBackendError> {
         let socket = match UdpSocket::bind(self.unspecified_bind_address) {
             Ok(value) => value,
@@ -186,7 +184,7 @@ impl DnsBackend for StandardDnsBackend {
 
             SocketAddr::from(SocketAddrV4::new(
                 Ipv4Addr::from(ipv4_address_array),
-                destination_port,
+                53,
             ))
         } else if destination_address.len() == 16 {
             // IPV6
@@ -203,7 +201,7 @@ impl DnsBackend for StandardDnsBackend {
 
             SocketAddr::from(SocketAddrV6::new(
                 Ipv6Addr::from(ipv6_address_array),
-                destination_port,
+                53,
                 0,
                 0,
             ))
@@ -239,16 +237,17 @@ impl DnsBackend for StandardDnsBackend {
                 .wosp_list
                 .list
                 .iter()
-                .position(|value| (value.creation_time as usize) == event.token().0)
+                .position(|value| value.id == event.token().0)
             {
                 if let Some(wosp) = self.wosp_list.list.remove(index) {
-                    debug!("process_event: Read from DNS socket: {:?}", wosp.socket);
-
+                    let response_time = Instant::now().duration_since(wosp.creation_time).as_millis();
+                    debug!("process_event: Took {}ms to respond to wosp {}", response_time, wosp.id);
                     match wosp.socket.recv(&mut self.response_packet.as_mut_slice()) {
                         Ok(size) => {
                             vpn.handle_dns_response(
                                 &wosp.packet,
                                 &mut self.response_packet[..size],
+                                response_time,
                             );
                         }
                         Err(error) => {

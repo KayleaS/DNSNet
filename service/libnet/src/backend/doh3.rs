@@ -430,7 +430,6 @@ impl DnsBackend for DoH3Backend {
         packet: &[u8],
         request_packet: &[u8],
         destination_address: Vec<u8>,
-        _: u16,
     ) -> Result<(), DnsBackendError> {
         let destination_server_string = match str::from_utf8(&destination_address) {
             Ok(value) => value,
@@ -724,9 +723,12 @@ impl DnsBackend for DoH3Backend {
 
                                     match connection.sent_request_streams.get(&stream_id) {
                                         Some(request) => {
+                                            let response_time = Instant::now().duration_since(request.creation_time).as_millis();
+                                            debug!("process_events: Took {}ms to respond for stream {}", response_time, stream_id);
                                             vpn.handle_dns_response(
                                                 &request.request_packet,
                                                 &self.input_buffer[..read],
+                                                response_time,
                                             );
                                         }
                                         None => {
